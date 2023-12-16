@@ -1,57 +1,56 @@
+
 import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import json
-import requests
-import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
 
-# Replace 'YOUR_API_KEY' with your Alpha Vantage API key
-api_key = 'HDR7CEO4SGKD9LYL'
-symbol = 'AAPL'  # Replace with the stock symbol you want to analyze
+import yfinance as yf
 
-# Load the prices data into a pandas DataFrame
-with open('data.json', 'r') as f:
-    data = json.load(f)
-prices = []
-for date, values in data['Time Series (Daily)'].items():
-    prices.append(float(values['4. close']))
-df = pd.DataFrame(prices, columns=['price'])
+# Download Apple stock data
+start_date = "2020-01-01"
+end_date = "2023-12-15"
+apple_data = yf.download("AAPL", start=start_date, end=end_date)
 
-# Split the data into training and testing sets
-train_size = int(len(df) * 0.8)
-train_df = df[:train_size]
-test_df = df[train_size:]
+# Preprocess data
+closing_prices = apple_data["Close"]
+scaled_prices = (closing_prices - closing_prices.mean()) / closing_prices.std()
 
-# Normalize the data
-train_mean = train_df.mean()
-train_std = train_df.std()
-train_df = (train_df - train_mean) / train_std
-test_df = (test_df - train_mean) / train_std
+# Feature engineering
+def create_features(data, window=20):
+    features = []
+    for i in range(len(data) - window):
+        features.append([
+            np.array(data[i - window : i]),
+            np.mean(data[i - window : i]),
+            np.std(data[i - window : i]),
+            data[i - window : i].max() - data[i - window : i].min(),
+        ])
+    return np.array(features)
 
-# Define the TensorFlow model
-model = tf.keras.Sequential([
-    tf.keras.layers.Dense(64, activation='relu', input_shape=[1]),
-    tf.keras.layers.Dense(64, activation='relu'),
-    tf.keras.layers.Dense(1)
-])
 
-# Compile the model
-model.compile(loss='mse', optimizer=tf.keras.optimizers.RMSprop(0.001), metrics=['mae', 'mse'])
+features = create_features(scaled_prices)
 
-# Train the model
-history = model.fit(train_df.index, train_df['price'], epochs=100, validation_split=0.2, verbose=0)
+# Split data into training and testing sets
+train_size = int(len(features) * 0.8)
+X_train, X_test = features[:train_size], features[train_size:]
 
-# Evaluate the model
-test_predictions = model.predict(test_df.index)
-test_predictions = test_predictions * train_std + train_mean
-test_mse = tf.keras.losses.mean_squared_error(test_df['price'], test_predictions).numpy()
-test_mae = tf.keras.losses.mean_absolute_error(test_df['price'], test_predictions).numpy()
-print(f'Test MSE: {test_mse:.2f}, Test MAE: {test_mae:.2f}')
+# Build and train LSTM model
+model = Sequential()
+model.add(LSTM(64, return_sequences=True, input_shape=(features.shape[1], features.shape[2])))
+model.add(LSTM(32))
+model.add(Dense(1))
+model.compile(loss="mse", optimizer="adam")
+model.fit(X_train, closing_prices[train_size:], epochs=50, batch_size=32)
 
-# Use the trained model to predict tomorrow's price
-last_price = df.iloc[-1]['price']
-normalized_last_price = (last_price - train_mean) / train_std
-tomorrow_index = df.index[-1] + 1
-tomorrow_normalized_price = model.predict([tomorrow_index])[0][0]
-tomorrow_price = tomorrow_normalized_price * train_std + train_mean
-print(f'Tomorrow\'s predicted price: {tomorrow_price:.2f}')
+# Predict future price and calculate buy/sell signal
+predicted_price = model.predict(X_test[-1].reshape(1, features.shape[1], features.shape[2]))[0][0]
+current_price = closing_prices.iloc[-1]
+
+buy_threshold = 0.03  # Change this based on your risk tolerance
+sell_threshold = -0.02  # Change this based on your risk tolerance
+
+buy_signal = "BUY" if predicted_price > current_price * (1 + buy_threshold) else "HOLD"
+sell_signal = "SELL" if predicted_price < current_price * (1 + sell_threshold) else "HOLD"
+
+print(f"Predicted price: ${predicted_price:.2f} | Current price: ${current_price:.2f}")
+print(f"Buy signal: {buy_signal}")
+print(f"Sell signal: {sell_signal}")
